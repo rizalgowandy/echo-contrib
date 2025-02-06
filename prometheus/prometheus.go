@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: © 2017 LabStack and Echo contributors
+
 /*
 Package prometheus provides middleware to add Prometheus metrics.
 
@@ -5,17 +8,21 @@ Example:
 ```
 package main
 import (
-    "github.com/labstack/echo/v4"
-    "github.com/labstack/echo-contrib/prometheus"
-)
-func main() {
-    e := echo.New()
-    // Enable metrics middleware
-    p := prometheus.NewPrometheus("echo", nil)
-    p.Use(e)
 
-    e.Logger.Fatal(e.Start(":1323"))
-}
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo-contrib/prometheus"
+
+)
+
+	func main() {
+	    e := echo.New()
+	    // Enable metrics middleware
+	    p := prometheus.NewPrometheus("echo", nil)
+	    p.Use(e)
+
+	    e.Logger.Fatal(e.Start(":1323"))
+	}
+
 ```
 */
 package prometheus
@@ -58,6 +65,7 @@ var reqSzBuckets = []float64{1.0 * KB, 2.0 * KB, 5.0 * KB, 10.0 * KB, 100 * KB, 
 var resSzBuckets = []float64{1.0 * KB, 2.0 * KB, 5.0 * KB, 10.0 * KB, 100 * KB, 500 * KB, 1.0 * MB, 2.5 * MB, 5.0 * MB, 10.0 * MB}
 
 // Standard default metrics
+//
 //	counter, counter_vec, gauge, gauge_vec,
 //	histogram, histogram_vec, summary, summary_vec
 var reqCnt = &Metric{
@@ -71,7 +79,7 @@ var reqDur = &Metric{
 	ID:          "reqDur",
 	Name:        "request_duration_seconds",
 	Description: "The HTTP request latencies in seconds.",
-	Args:        []string{"code", "method", "url"},
+	Args:        []string{"code", "method", "host", "url"},
 	Type:        "histogram_vec",
 	Buckets:     reqDurBuckets}
 
@@ -79,7 +87,7 @@ var resSz = &Metric{
 	ID:          "resSz",
 	Name:        "response_size_bytes",
 	Description: "The HTTP response sizes in bytes.",
-	Args:        []string{"code", "method", "url"},
+	Args:        []string{"code", "method", "host", "url"},
 	Type:        "histogram_vec",
 	Buckets:     resSzBuckets}
 
@@ -87,7 +95,7 @@ var reqSz = &Metric{
 	ID:          "reqSz",
 	Name:        "request_size_bytes",
 	Description: "The HTTP request sizes in bytes.",
-	Args:        []string{"code", "method", "url"},
+	Args:        []string{"code", "method", "host", "url"},
 	Type:        "histogram_vec",
 	Buckets:     reqSzBuckets}
 
@@ -104,16 +112,16 @@ the cardinality of the request counter's "url" label, which might be required in
 For instance, if for a "/customer/:name" route you don't want to generate a time series for every
 possible customer name, you could use this function:
 
-func(c echo.Context) string {
-	url := c.Request.URL.Path
-	for _, p := range c.Params {
-		if p.Key == "name" {
-			url = strings.Replace(url, p.Value, ":name", 1)
-			break
+	func(c echo.Context) string {
+		url := c.Request.URL.Path
+		for _, p := range c.Params {
+			if p.Key == "name" {
+				url = strings.Replace(url, p.Value, ":name", 1)
+				break
+			}
 		}
+		return url
 	}
-	return url
-}
 
 which would map "/customer/alice" and "/customer/bob" to their template "/customer/:name".
 It can also be applied for the "Host" label
@@ -133,6 +141,7 @@ type Metric struct {
 }
 
 // Prometheus contains the metrics gathered by the instance and its path
+// Deprecated: use echoprometheus package instead
 type Prometheus struct {
 	reqCnt               *prometheus.CounterVec
 	reqDur, reqSz, resSz *prometheus.HistogramVec
@@ -167,6 +176,7 @@ type PushGateway struct {
 }
 
 // NewPrometheus generates a new set of metrics with a certain subsystem name
+// Deprecated: use echoprometheus package instead
 func NewPrometheus(subsystem string, skipper middleware.Skipper, customMetricsList ...[]*Metric) *Prometheus {
 	var metricsList []*Metric
 	if skipper == nil {
@@ -187,7 +197,13 @@ func NewPrometheus(subsystem string, skipper middleware.Skipper, customMetricsLi
 		Subsystem:   defaultSubsystem,
 		Skipper:     skipper,
 		RequestCounterURLLabelMappingFunc: func(c echo.Context) string {
-			return c.Path() // i.e. by default do nothing, i.e. return URL as is
+			p := c.Path() // contains route path ala `/users/:id`
+			if p != "" {
+				return p
+			}
+			// as of Echo v4.10.1 path is empty for 404 cases (when router did not find any matching routes)
+			// in this case we use actual path from request to have some distinction in Prometheus
+			return c.Request().URL.Path
 		},
 		RequestCounterHostLabelMappingFunc: func(c echo.Context) string {
 			return c.Request().Host
@@ -286,6 +302,7 @@ func (p *Prometheus) startPushTicker() {
 }
 
 // NewMetric associates prometheus.Collector based on Metric.Type
+// Deprecated: use echoprometheus package instead
 func NewMetric(m *Metric, subsystem string) prometheus.Collector {
 	var metric prometheus.Collector
 	switch m.Type {
@@ -428,12 +445,12 @@ func (p *Prometheus) HandlerFunc(next echo.HandlerFunc) echo.HandlerFunc {
 		}
 
 		statusStr := strconv.Itoa(status)
-		p.reqDur.WithLabelValues(statusStr, c.Request().Method, url).Observe(elapsed)
+		p.reqDur.WithLabelValues(statusStr, c.Request().Method, p.RequestCounterHostLabelMappingFunc(c), url).Observe(elapsed)
 		p.reqCnt.WithLabelValues(statusStr, c.Request().Method, p.RequestCounterHostLabelMappingFunc(c), url).Inc()
-		p.reqSz.WithLabelValues(statusStr, c.Request().Method, url).Observe(float64(reqSz))
+		p.reqSz.WithLabelValues(statusStr, c.Request().Method, p.RequestCounterHostLabelMappingFunc(c), url).Observe(float64(reqSz))
 
 		resSz := float64(c.Response().Size)
-		p.resSz.WithLabelValues(statusStr, c.Request().Method, url).Observe(resSz)
+		p.resSz.WithLabelValues(statusStr, c.Request().Method, p.RequestCounterHostLabelMappingFunc(c), url).Observe(resSz)
 
 		return err
 	}

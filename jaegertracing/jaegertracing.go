@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: © 2017 LabStack and Echo contributors
+
 /*
 Package jaegertracing provides middleware to Opentracing using Jaeger.
 
@@ -5,17 +8,21 @@ Example:
 ```
 package main
 import (
-    "github.com/labstack/echo-contrib/jaegertracing"
-    "github.com/labstack/echo/v4"
-)
-func main() {
-    e := echo.New()
-    // Enable tracing middleware
-    c := jaegertracing.New(e, nil)
-    defer c.Close()
 
-    e.Logger.Fatal(e.Start(":1323"))
-}
+	"github.com/labstack/echo-contrib/jaegertracing"
+	"github.com/labstack/echo/v4"
+
+)
+
+	func main() {
+	    e := echo.New()
+	    // Enable tracing middleware
+	    c := jaegertracing.New(e, nil)
+	    defer c.Close()
+
+	    e.Logger.Fatal(e.Start(":1323"))
+	}
+
 ```
 */
 package jaegertracing
@@ -26,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -176,7 +182,7 @@ func TraceWithConfig(config TraceConfig) echo.MiddlewareFunc {
 				// request
 				reqBody := []byte{}
 				if c.Request().Body != nil {
-					reqBody, _ = ioutil.ReadAll(c.Request().Body)
+					reqBody, _ = io.ReadAll(c.Request().Body)
 
 					if config.LimitHTTPBody {
 						sp.LogKV("http.req.body", limitString(string(reqBody), config.LimitSize))
@@ -185,7 +191,7 @@ func TraceWithConfig(config TraceConfig) echo.MiddlewareFunc {
 					}
 				}
 
-				req.Body = ioutil.NopCloser(bytes.NewBuffer(reqBody)) // reset original request body
+				req.Body = io.NopCloser(bytes.NewBuffer(reqBody)) // reset original request body
 
 				// response
 				respDumper = newResponseDumper(c.Response())
@@ -193,8 +199,22 @@ func TraceWithConfig(config TraceConfig) echo.MiddlewareFunc {
 			}
 
 			// setup request context - add opentracing span
-			req = req.WithContext(opentracing.ContextWithSpan(req.Context(), sp))
-			c.SetRequest(req)
+			reqSpan := req.WithContext(opentracing.ContextWithSpan(req.Context(), sp))
+			c.SetRequest(reqSpan)
+			defer func() {
+				// as we have created new http.Request object we need to make sure that temporary files created to hold MultipartForm
+				// files are cleaned up. This is done by http.Server at the end of request lifecycle but Server does not
+				// have reference to our new Request instance therefore it is our responsibility to fix the mess we caused.
+				//
+				// This means that when we are on returning path from handler middlewares up in chain from this middleware
+				// can not access these temporary files anymore because we deleted them here.
+				if reqSpan.MultipartForm != nil {
+					reqSpan.MultipartForm.RemoveAll()
+				}
+			}()
+
+			// inject Jaeger context into request header
+			config.Tracer.Inject(sp.Context(), opentracing.HTTPHeaders, opentracing.HTTPHeadersCarrier(c.Request().Header))
 
 			// call next middleware / controller
 			err = next(c)
@@ -316,7 +336,7 @@ func CreateChildSpan(ctx echo.Context, name string) opentracing.Span {
 
 // NewTracedRequest generates a new traced HTTP request with opentracing headers injected into it
 func NewTracedRequest(method string, url string, body io.Reader, span opentracing.Span) (*http.Request, error) {
-	req, err := http.NewRequest(method, url, nil)
+	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		panic(err.Error())
 	}
